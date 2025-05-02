@@ -3,30 +3,35 @@ from pydub import AudioSegment, silence
 import os
 import tempfile
 import subprocess
+import time
 
 # Load audio from various formats
-def load_audio(file_path):
+def load_audio(file_path, format=None):
     ext = os.path.splitext(file_path)[-1].lower().replace('.', '')
     try:
-        return AudioSegment.from_file(file_path, format=ext)
+        if format:
+            return AudioSegment.from_file(file_path, format=format)
+        else:
+            return AudioSegment.from_file(file_path, format=ext)
     except Exception as e:
-        print(f"❌ Failed to load {file_path} as format '{ext}': {e}")
+        print(f"❌ Failed to load {file_path} as format '{ext}' (or '{format}'): {e}")
         raise
 
-def convert_to_mp3_if_needed(input_path):
-    ext = os.path.splitext(input_path)[-1].lower()
-    if ext == ".mp3":
-        print("✅ Already mp3, skipping conversion.")
-        return input_path  # No need to convert
-    print("🔄 Converting to .mp3 for processing...")
-    audio = load_audio(input_path)
+def convert_to_mp3(input_path):
+    print(f"🔄 Converting {input_path} to .mp3 for processing...")
     temp_mp3 = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False).name
-    audio.export(temp_mp3, format="mp3")
-    return temp_mp3
-
+    try:
+        audio = load_audio(input_path)
+        audio.export(temp_mp3, format="mp3")
+        return temp_mp3
+    except Exception as e:
+        print(f"🔥 Error during conversion to MP3: {e}")
+        if os.path.exists(temp_mp3):
+            os.remove(temp_mp3)
+        raise
 
 # Remove long silences
-def trim_silences(audio, silence_thresh=-40, min_silence_len=100, target_silence_len=70):
+def trim_silences(audio, silence_thresh=-60, min_silence_len=250, target_silence_len=180):
     silent_ranges = silence.detect_silence(audio,
                                            min_silence_len=min_silence_len,
                                            silence_thresh=silence_thresh)
@@ -73,65 +78,66 @@ def save_audio(audio, output_path):
         format_ext = "ipod"
     audio.export(output_path, format=format_ext)
 
-# Extract audio from video
-def extract_audio_from_video(video_path, output_audio_path="temp_audio.wav"):
-    command = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vn", "-acodec", "pcm_s16le",
-        "-ar", "16000", "-ac", "1",
-        output_audio_path
-    ]
-    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return output_audio_path
-
 # Clean audio main function
-def clean_audio(file_path, output_path):
-    print(f"🧹 Cleaning: {file_path}")
+def clean_audio(input_file, output_file):
+    print(f"🧹 Cleaning: {input_file}")
+    processing_path = input_file
+    temp_extracted_audio = None
 
-    # Extract audio if it's a video
-    if file_path.lower().endswith((".mp4", ".mov", ".mkv")):
-        print("🎞️ Extracting audio from video...")
-        file_path = extract_audio_from_video(file_path)
+    try:
+        if input_file.lower().endswith((".mp4", ".mov", ".mkv")):
+            print("🎞️ Input is a video file.")
+            temp_extracted_audio = convert_to_mp3(input_file)
+            processing_path = temp_extracted_audio
+        elif input_file.lower().endswith((".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a")):
+            print("🎧 Input is an audio file.")
+            # No conversion needed for common audio formats
+        else:
+            print(f"⚠️ Unsupported input file format: {input_file}")
+            return
 
-    if not os.path.exists(file_path):
-        print(f"❌ File not found: {file_path}")
-        return
+        if not os.path.exists(processing_path):
+            print(f"❌ Could not access processing file: {processing_path}")
+            return
 
-    # Step 1: Convert to mp3 if needed
-    processing_path = convert_to_mp3_if_needed(file_path)
-    audio = AudioSegment.from_file(processing_path)
+        # Step 1: Load audio for processing (now loading the processing_path)
+        audio = AudioSegment.from_mp3(processing_path)
 
-    # Step 2: Transcribe
-    print("🧠 Transcribing for filler word detection...")
-    transcription = transcribe_audio(processing_path)
+        # Step 2: Transcribe
+        print("🧠 Transcribing for filler word detection...")
+        transcription = transcribe_audio(processing_path)
 
-    # Step 3: Remove filler words
-    print("✂️ Removing filler words...")
-    audio_no_fillers = remove_filler_words(audio, transcription)
+        # Step 3: Remove filler words
+        print("✂️ Removing filler words...")
+        audio_no_fillers = remove_filler_words(audio, transcription)
 
-    # Step 4: Trim silences
-    print("🎧 Trimming long silences...")
-    final_audio = trim_silences(audio_no_fillers)
+        # Step 4: Trim silences
+        print("🎧 Trimming long silences...")
+        final_audio = trim_silences(audio_no_fillers)
 
-    # Step 5: Save final output in original format
-    print("💾 Saving final audio...")
-    save_audio(final_audio, output_path)
-    print(f"✅ Done! Output saved as: {output_path}")
+        # Step 5: Save final output
+        print(f"💾 Saving cleaned audio to: {output_file}")
+        save_audio(final_audio, output_file)
+        print(f"✅ Cleaning complete! Output saved as: {output_file}")
+
+    except Exception as e:
+        print(f"🔥 An error occurred during the cleaning process: {e}")
+    finally:
+        if temp_extracted_audio and os.path.exists(temp_extracted_audio):
+            os.remove(temp_extracted_audio)
+            print(f"🗑️ Removed temporary extracted audio file: {temp_extracted_audio}")
 
 # Script entry point
 import sys
+import os
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("❗ Please provide a file to clean. Example:")
-        print("   python cleaner.py your_audio_file.mp3")
+        print("❗ Please provide the input file path as a command-line argument.")
+        print("   Example: python cleaner.py input.mp4")
         sys.exit(1)
 
     input_file = sys.argv[1]
-
-    # Get extension to preserve original format
-    ext = os.path.splitext(input_file)[-1].lower()
-    output_file = f"cleaned_{os.path.splitext(os.path.basename(input_file))[0]}{ext}"
+    output_file = f"cleaned_{os.path.splitext(os.path.basename(input_file))[0]}.mp3"  # Force .mp3 extension
 
     clean_audio(input_file, output_file)
-
